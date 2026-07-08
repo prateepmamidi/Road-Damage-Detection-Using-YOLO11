@@ -1,73 +1,197 @@
+# ==========================================================
+# ROAD DAMAGE DETECTION SYSTEM
+# Streamlit + YOLO11n
+# ==========================================================
 
-# Streamlit app for LoveDA SegFormer
 import streamlit as st
-import numpy as np
-import pandas as pd
-import torch
-import torch.nn.functional as F
+from ultralytics import YOLO
 from PIL import Image
-from io import BytesIO
-import plotly.express as px
-from transformers import SegformerForSemanticSegmentation
+import tempfile
+import os
+import pandas as pd
+from collections import Counter
 
-DEVICE=torch.device("cuda" if torch.cuda.is_available() else "cpu")
-MODEL_PATH="segformer_best.pth"
-IMAGE_SIZE=512
-NUM_CLASSES=8
-CLASS_NAMES=["Background","Building","Road","Water","Barren","Forest","Agriculture","Unknown"]
-COLORS=np.array([[0,0,0],[255,0,0],[255,255,0],[0,0,255],[139,69,19],[0,255,0],[255,165,0],[255,255,255]],dtype=np.uint8)
-MEAN=np.array([0.485,0.456,0.406],dtype=np.float32)
-STD=np.array([0.229,0.224,0.225],dtype=np.float32)
+# ==========================================================
+# PAGE CONFIGURATION
+# ==========================================================
 
+st.set_page_config(
+    page_title="Road Damage Detection",
+    page_icon="🛣️",
+    layout="wide"
+)
+
+# ==========================================================
+# LOAD TRAINED MODEL
+# ==========================================================
+
+MODEL_PATH = "C:/Users/SRMAP_JC203/Desktop/prateep/vizag_intern/archive/dataset/runs/detect/RoadDamage_Project/YOLO11n_Final/weights/best.pt"
 @st.cache_resource
 def load_model():
-    m=SegformerForSemanticSegmentation.from_pretrained(
-        "nvidia/segformer-b0-finetuned-ade-512-512",
-        num_labels=NUM_CLASSES,
-        ignore_mismatched_sizes=True)
-    m.load_state_dict(torch.load(MODEL_PATH,map_location=DEVICE))
-    m.to(DEVICE).eval()
-    return m
+    return YOLO(MODEL_PATH)
 
-model=load_model()
+model = load_model()
 
-def preprocess(img):
-    img=img.convert("RGB").resize((IMAGE_SIZE,IMAGE_SIZE))
-    x=np.asarray(img).astype(np.float32)/255.0
-    x=(x-MEAN)/STD
-    x=x.transpose(2,0,1)
-    return torch.from_numpy(x).unsqueeze(0).to(DEVICE)
+CLASS_NAMES = model.names
 
-@torch.no_grad()
-def predict(img):
-    out=model(preprocess(img)).logits
-    out=F.interpolate(out,size=(IMAGE_SIZE,IMAGE_SIZE),mode="bilinear",align_corners=False)
-    return out.argmax(1).squeeze().cpu().numpy()
+# ==========================================================
+# APPLICATION HEADER
+# ==========================================================
 
-def to_png(arr):
-    bio=BytesIO()
-    Image.fromarray(arr).save(bio,format="PNG")
-    return bio.getvalue()
+st.title("🛣️ Road Damage Detection System")
 
-st.set_page_config(page_title="LoveDA SegFormer",layout="wide")
-st.title("🌍 LoveDA Land Cover Segmentation")
-up=st.file_uploader("Upload image",type=["png","jpg","jpeg","tif","tiff"])
-if up:
-    img=Image.open(up)
-    pred=predict(img)
-    mask=COLORS[pred]
-    base=np.asarray(img.resize((IMAGE_SIZE,IMAGE_SIZE)))
-    over=((0.6*base)+(0.4*mask)).astype(np.uint8)
-    c1,c2,c3=st.columns(3)
-    c1.image(img,caption="Original",use_container_width=True)
-    c2.image(mask,caption="Segmentation",use_container_width=True)
-    c3.image(over,caption="Overlay",use_container_width=True)
-    total=pred.size
-    df=pd.DataFrame({
-        "Class":CLASS_NAMES,
-        "Coverage (%)":[round((pred==i).sum()*100/total,2) for i in range(NUM_CLASSES)]
-    })
-    st.dataframe(df,use_container_width=True)
-    st.plotly_chart(px.pie(df,names="Class",values="Coverage (%)"),use_container_width=True)
-    st.download_button("Download Mask",to_png(mask),"segmentation_mask.png","image/png")
-    st.download_button("Download Overlay",to_png(over),"overlay.png","image/png")
+st.markdown("""
+Upload a road image to automatically detect:
+
+- 🕳️ Potholes
+- 🪨 Cracks
+- ⭕ Manholes
+""")
+st.sidebar.header("Detection Settings")
+
+confidence = st.sidebar.number_input(
+    "Confidence Threshold",
+    min_value=0.10,
+    max_value=1.00,
+    value=0.25,
+    step=0.05
+)
+
+uploaded_file = st.file_uploader(
+    "Upload Road Image",
+    type=["jpg", "jpeg", "png"]
+)
+
+
+# ==========================================================
+# IMAGE UPLOAD AND OBJECT DETECTION
+# ==========================================================
+
+if uploaded_file is not None:
+
+    # Display Uploaded Image
+    image = Image.open(uploaded_file)
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("Original Image")
+        st.image(image, use_container_width=True)
+
+    # Save uploaded image temporarily
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
+        image.save(tmp_file.name)
+        temp_image_path = tmp_file.name
+
+    # Run YOLO Prediction
+    results = model.predict(
+        source=temp_image_path,
+        conf=confidence,
+        save=False,
+        verbose=False
+    )
+
+    # Annotated Image
+    annotated = results[0].plot()
+
+    with col2:
+        st.subheader("Detection Result")
+        st.image(annotated, channels="BGR", use_container_width=True)
+
+    # ==========================================================
+    # DETECTION SUMMARY
+    # ==========================================================
+
+    st.markdown("---")
+    st.subheader("Detection Summary")
+
+    counter = Counter()
+    detection_data = []
+
+    for box in results[0].boxes:
+
+        cls = int(box.cls[0])
+        conf = float(box.conf[0])
+
+        class_name = CLASS_NAMES[cls]
+
+        counter[class_name] += 1
+
+        detection_data.append({
+            "Class": class_name.title(),
+            "Confidence": f"{conf*100:.2f}%"
+        })
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        st.metric(
+            "🕳️ Potholes",
+            counter.get("pothole", 0)
+        )
+
+    with col2:
+        st.metric(
+            "🪨 Cracks",
+            counter.get("crack", 0)
+        )
+
+    with col3:
+        st.metric(
+            "⭕ Manholes",
+            counter.get("manhole", 0)
+        )
+
+    with col4:
+        st.metric(
+            "📦 Total Objects",
+            sum(counter.values())
+        )
+
+    # ==========================================================
+    # DETECTION TABLE
+    # ==========================================================
+
+    st.markdown("---")
+    st.subheader("Detected Objects")
+
+    if len(detection_data) > 0:
+
+        df = pd.DataFrame(detection_data)
+
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True
+        )
+
+    else:
+
+        st.warning("No road damage detected.")
+
+    # ==========================================================
+    # DOWNLOAD RESULT IMAGE
+    # ==========================================================
+
+    result_image = Image.fromarray(annotated)
+
+    output_path = "prediction_result.jpg"
+
+    result_image.save(output_path)
+
+    with open(output_path, "rb") as file:
+
+        st.download_button(
+            label="⬇️ Download Detection Result",
+            data=file,
+            file_name="Road_Damage_Result.jpg",
+            mime="image/jpeg"
+        )
+
+    # Remove temporary file
+    os.remove(temp_image_path)
+
+
+
+
+    
